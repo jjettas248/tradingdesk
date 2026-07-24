@@ -1,0 +1,300 @@
+// Apex Morning Trading Desk — data model.
+//
+// Design notes that matter:
+//  - Explanation and PostTradeReview are INSERT-ONLY at the application layer.
+//    Their content is generated once (before the ticket is sent) and never
+//    edited. A content hash over {evidence, sections, model, promptVersion,
+//    createdAt} makes the "generated-before / revealed-after" ordering provable,
+//    not merely policy.
+//  - SQLite (via the libSQL adapter) has no native enums, so enum-like fields are
+//    String with the allowed values documented inline and enforced in code.
+//  - JSON columns hold structured evidence/section objects; SQLite stores them as
+//    TEXT and Prisma (de)serializes.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// The authorized setups. Only rows here can be traded; anything else is research.
+model PlaybookSetup {
+  id          String   @id @default(cuid())
+  key         String   @unique // SETUP_1_CATALYST_CONTINUATION | SETUP_2_INDEX_TREND_PULLBACK
+  name        String
+  description String // markdown, rendered by the /playbook dashboard page
+  assetClass  String // EQUITY | INDEX_FUTURE
+  version     Int      @default(1) // bump on threshold change; stamped onto every Candidate
+  active      Boolean  @default(true)
+  thresholds  Json // tunable numeric params; setup predicates receive this explicitly
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  candidates Candidate[]
+}
+
+/// One row per ET trading session. Snapshots the risk posture at scan time.
+model TradingDay {
+  id               String   @id @default(cuid())
+  dateKey          String   @unique // ET "YYYY-MM-DD"
+  scanStatus       String   @default("PENDING") // PENDING | SCANNING | SCANNED | FAILED
+  sendStatus       String   @default("PENDING") // PENDING | SENDING | COMPLETE
+  riskMultiplier   Float    @default(1) // drawdown-throttle multiplier snapshot
+  haltActiveAtScan Boolean  @default(false)
+  ticketsArmed     Int      @default(0)
+  entriesLogged    Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  candidates Candidate[]
+
+  @@index([dateKey])
+}
+
+/// Every symbol the pipeline evaluated, with its full evidence trail — even on
+/// rejection, so the journal can show why something was passed over.
+model Candidate {
+  id              String   @id @default(cuid())
+  tradingDayId    String
+  tradingDay      TradingDay @relation(fields: [tradingDayId], references: [id])
+  setupKey        String
+  setup           PlaybookSetup @relation(fields: [setupKey], references: [key])
+  symbol          String
+  assetClass      String // EQUITY | INDEX_FUTURE
+  direction       String   @default("LONG") // LONG | SHORT
+  status          String   @default("SCANNED") // SCANNED | FLAGGED | REJECTED | ARMED | SENT | EXPIRED
+  rejectedAtStage String? // SCANNER | CATALYST_FLOW | QUANT | TRADE_ARCHITECT | RISK_MANAGER | CHIEF_TRADER
+  rejectionReason String?
+  evidence        Json // accumulated CheckResult[] from every stage that ran
+  playbookVersion Int      @default(1)
+  rank            Int? // set by Chief Trader for survivors
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  ticket Ticket?
+
+  @@index([tradingDayId, status])
+  @@index([status])
+}
+
+/// A concrete, sendable order ticket. Exists only once a Candidate is ARMED.
+model Ticket {
+  id                String   @id @default(cuid())
+  candidateId       String   @unique
+  candidate         Candidate @relation(fields: [candidateId], references: [id])
+  entryLow          Float
+  entryHigh         Float
+  triggerCondition  String
+  stopPrice         Float
+  target1Price      Float
+  target2Price      Float
+  maxEntryPrice     Float // chase limit
+  positionSize      Float // shares (equity) or contracts (futures)
+  sizeUnit          String // SHARES | CONTRACTS
+  maxDollarLoss     Float
+  runnerPlan        String // static management plan, e.g. "70% at T1, trail rest, close T2/EOD"
+  orderTypeNote     String   @default("Limit entry + protective bracket (stop + targets)")
+  alertExpiresAt    DateTime
+  sentAt            DateTime?
+  telegramChatId    String?
+  telegramMessageId String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  explanation Explanation?
+  decision    Decision?
+  position    Position?
+
+  @@index([alertExpiresAt])
+}
+
+/// The immutable pre-trade "why this trade" explanation. INSERT-ONLY except the
+/// single narrow revealExplanation() flip of revealedAt.
+model Explanation {
+  id               String   @id @default(cuid())
+  ticketId         String   @unique
+  ticket           Ticket   @relation(fields: [ticketId], references: [id])
+  evidenceSnapshot Json // exact evidence the prompt was built from
+  sections         Json // { evidenceChecklist, whyThisEntry, invalidation, patternLesson, reflectionPrompts }
+  model            String
+  promptVersion    String
+  contentHash      String // sha256 over {evidenceSnapshot, sections, model, promptVersion, createdAt}
+  createdAt        DateTime @default(now())
+  revealedAt       DateTime? // null until the user responds; only field ever mutated post-insert
+}
+
+/// The user's response to a ticket.
+model Decision {
+  id                    String   @id @default(cuid())
+  ticketId              String   @unique
+  ticket                Ticket   @relation(fields: [ticketId], references: [id])
+  decisionType          String // ENTERED | SKIPPED | TOO_LATE | REJECTED
+  decidedAt             DateTime @default(now())
+  traderStageAtDecision String // FOLLOW_AND_STUDY | PREDICT_BEFORE_REVEAL | INDEPENDENT_NOMINATION | INDEPENDENT_EXECUTION
+  rawCallbackData       String?
+  createdAt             DateTime @default(now())
+}
+
+/// Created only on an ENTERED decision. Tracked via a short human-friendly code.
+model Position {
+  id                String   @id @default(cuid())
+  ticketId          String   @unique
+  ticket            Ticket   @relation(fields: [ticketId], references: [id])
+  shortCode         Int      @unique // e.g. 47, used in /fill and /exit
+  symbol            String
+  setupKey          String
+  assetClass        String
+  direction         String // LONG | SHORT
+  plannedEntryLow   Float
+  plannedEntryHigh  Float
+  actualEntryPrice  Float? // null until /fill
+  actualEntryAt     DateTime?
+  positionSize      Float // may be self-reported different from ticket
+  sizeUnit          String
+  stopPrice         Float
+  target1Price      Float
+  target2Price      Float
+  status            String   @default("AWAITING_FILL") // AWAITING_FILL | OPEN | CLOSED
+  lastExceptionType String? // dedupes repeated fast-loop alerts (STOP|TARGET1|TARGET2|INVALIDATION)
+  lastExceptionAt   DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  exits  Exit[]
+  review PostTradeReview?
+
+  @@index([status])
+}
+
+/// A (possibly partial) close of a position. 1:many — the design trades runners,
+/// so scaling out is a first-class concept, not a single full-close row.
+model Exit {
+  id                    String   @id @default(cuid())
+  positionId            String
+  position              Position @relation(fields: [positionId], references: [id])
+  portionPercent        Float // e.g. 70 for scaling 70% at target 1
+  exitPrice             Float
+  exitAt                DateTime @default(now())
+  exitReason            String // STOP | TARGET1 | TARGET2 | MANUAL | EOD | OTHER
+  exitNote              String?
+  maxFavorableExcursion Float?
+  maxAdverseExcursion   Float?
+  realizedPnl           Float?
+  realizedR             Float?
+  createdAt             DateTime @default(now())
+
+  @@index([positionId])
+}
+
+/// The second delayed lesson, generated after the position fully closes. Same
+/// insert-only + hash pattern as Explanation, minus the reveal gate (it's
+/// inherently after-the-fact by design).
+model PostTradeReview {
+  id            String   @id @default(cuid())
+  positionId    String   @unique
+  position      Position @relation(fields: [positionId], references: [id])
+  sections      Json // { whatHappened, thesisAssessment, executionAssessment, exitAssessment, patternLesson }
+  model         String
+  promptVersion String
+  contentHash   String
+  createdAt     DateTime @default(now())
+  deliveredAt   DateTime?
+}
+
+/// Point-in-time score for one of the two tracks.
+model ScoreSnapshot {
+  id         String   @id @default(cuid())
+  track      String // TRADING_RESULTS | TRADER_DEVELOPMENT
+  positionId String? // set for trade-triggered snapshots
+  asOf       DateTime @default(now())
+  score      Float
+  components Json // sub-metric breakdown
+  notes      String?
+  createdAt  DateTime @default(now())
+
+  @@index([track, asOf])
+}
+
+/// Equity curve — drives the drawdown throttle.
+model EquitySnapshot {
+  id          String   @id @default(cuid())
+  asOf        DateTime @default(now())
+  equityValue Float
+  source      String   @default("MANUAL") // MANUAL | COMPUTED
+  note        String?
+  createdAt   DateTime @default(now())
+
+  @@index([asOf])
+}
+
+/// A hard risk halt. Never auto-clears — a human must resolve it.
+model RiskHaltState {
+  id                     String    @id @default(cuid())
+  active                 Boolean   @default(true)
+  triggeredAt            DateTime  @default(now())
+  triggerDrawdownPercent Float
+  triggerNote            String?
+  resolvedAt             DateTime?
+  resolvedNote           String?
+  createdAt              DateTime  @default(now())
+
+  @@index([active])
+}
+
+/// The fast loop's continuous ingestion: one row per news/flow observation.
+model MarketEvent {
+  id           String   @id @default(cuid())
+  symbol       String
+  eventType    String // NEWS | FLOW | PRICE
+  occurredAt   DateTime
+  headline     String?
+  summary      String?
+  payload      Json // provider-specific structured detail (rvol, flow notional, etc.)
+  processed    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([symbol, occurredAt])
+  @@index([processed])
+}
+
+/// Per-symbol high-water mark of what the fast loop has already ingested, so each
+/// poll only pulls new events.
+model ProviderCursor {
+  id           String   @id @default(cuid())
+  symbol       String   @unique
+  lastSeenAt   DateTime
+  updatedAt    DateTime @updatedAt
+}
+
+/// Audit trail of every LLM call — matches the "track everything" requirement and
+/// makes materiality-drift auditable over time.
+model LlmCallLog {
+  id                 String   @id @default(cuid())
+  purpose            String // CATALYST_MATERIALITY | PRETRADE_EXPLANATION | POSTTRADE_REVIEW
+  relatedCandidateId String?
+  relatedPositionId  String?
+  model              String
+  promptVersion      String
+  requestSummary     Json
+  responseSummary    Json
+  latencyMs          Int
+  inputTokens        Int?
+  outputTokens       Int?
+  createdAt          DateTime @default(now())
+
+  @@index([purpose, createdAt])
+}
+
+/// Single-row app config (solo operator).
+model DeskConfig {
+  id             String   @id @default("singleton")
+  telegramChatId String?
+  currentStage   String   @default("FOLLOW_AND_STUDY") // FOLLOW_AND_STUDY | PREDICT_BEFORE_REVEAL | INDEPENDENT_NOMINATION | INDEPENDENT_EXECUTION
+  stageStartedAt DateTime @default(now())
+  nextShortCode  Int      @default(1) // monotonic counter for Position.shortCode
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
