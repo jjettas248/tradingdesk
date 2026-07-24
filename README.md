@@ -61,16 +61,16 @@ session following [`RUNBOOK.md`](./RUNBOOK.md).
 
 ## Stack
 
-Next.js (App Router) + TypeScript · Prisma + libSQL/SQLite (drop-in to Turso in
-prod) · Anthropic SDK (structured output) · Telegram bot (mobile tickets + buttons)
-· Vitest.
+Next.js (App Router) + TypeScript · Prisma + **PostgreSQL** (Railway in prod) ·
+Anthropic SDK (structured output) · Telegram bot (mobile tickets + buttons) ·
+Vitest.
 
-## Quick start (no accounts needed)
+## Quick start
 
 ```bash
 npm install
-cp .env.example .env
-npx prisma migrate dev          # creates + seeds the local SQLite db
+cp .env.example .env            # set DATABASE_URL to your Postgres (Railway or local)
+npx prisma migrate dev          # applies the migration + seeds
 npm test                        # unit + integration tests
 
 # Run the desk end-to-end in dry-run (stub LLM, logged Telegram):
@@ -83,9 +83,11 @@ npm run dev                      # http://localhost:3000
 ```
 
 With no `ANTHROPIC_API_KEY` the desk uses a deterministic **stub LLM**; with no
-`TELEGRAM_BOT_TOKEN` it runs in **dry-run** (messages logged). Set both (plus
-`DATABASE_URL` → Turso, `CRON_SECRET`, `TELEGRAM_WEBHOOK_SECRET`, dashboard basic
-auth) to go live. **Never put secrets in source or chat** — use secure env config.
+`TELEGRAM_BOT_TOKEN` it runs in **dry-run** (messages logged). Set both (plus your
+Railway `DATABASE_URL`, `CRON_SECRET`, `TELEGRAM_WEBHOOK_SECRET`, and dashboard
+basic auth) to go live. On Railway, use `npm run start:prod` as the start command —
+it runs `prisma migrate deploy` before booting. **Never put secrets in source or
+chat** — use Railway's env config.
 
 ## CLI
 
@@ -96,7 +98,8 @@ auth) to go live. **Never put secrets in source or chat** — use secure env con
 
 Live broker execution (deferred until after a 30-day shadow-validation period),
 real market data (mock provider ships; the interface is built for a drop-in swap),
-and skill-progression Stages 2–4 (the data model supports them; only Stage 1 has a
+Telegram registration (runs in dry-run until a bot token is set), and
+skill-progression Stages 2–4 (the data model supports them; only Stage 1 has a
 working flow).
 
 ## Status

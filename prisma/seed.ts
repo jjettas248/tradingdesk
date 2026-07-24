@@ -1,17 +1,11 @@
 import { PrismaClient } from "@prisma/client";
-import { PrismaLibSQL } from "@prisma/adapter-libsql";
 import { SETUP_KEYS } from "../src/server/config/constants.ts";
-import { resolveDatabaseUrl } from "../src/server/db/url.ts";
 import {
   DEFAULT_SETUP1_THRESHOLDS,
   DEFAULT_SETUP2_THRESHOLDS,
 } from "../src/server/pipeline/setups/thresholds.ts";
 
-const adapter = new PrismaLibSQL({
-  url: resolveDatabaseUrl(process.env.DATABASE_URL),
-  authToken: process.env.DATABASE_AUTH_TOKEN,
-});
-const prisma = new PrismaClient({ adapter });
+const prisma = new PrismaClient();
 
 const SETUP1_DESCRIPTION = `## Setup 1 — Catalyst Continuation Pullback
 
