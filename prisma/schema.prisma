@@ -6,17 +6,17 @@
 //    edited. A content hash over {evidence, sections, model, promptVersion,
 //    createdAt} makes the "generated-before / revealed-after" ordering provable,
 //    not merely policy.
-//  - SQLite (via the libSQL adapter) has no native enums, so enum-like fields are
-//    String with the allowed values documented inline and enforced in code.
-//  - JSON columns hold structured evidence/section objects; SQLite stores them as
-//    TEXT and Prisma (de)serializes.
+//  - Enum-like fields are String with the allowed values documented inline and
+//    enforced in code (kept portable rather than using native Postgres enums, so
+//    adding a value never needs a migration).
+//  - JSON columns hold structured evidence/section objects (Postgres jsonb).
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
